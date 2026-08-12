@@ -95,10 +95,10 @@ const CMD_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // POST /api/command — admin panel writes a redirect command
 app.post('/api/command', (req, res) => {
-  const { cardId, target } = req.body || {};
+  const { cardId, target, notify } = req.body || {};
   if (!target) return res.status(400).json({ error: 'target required' });
   const id = cardId || 'current-card';
-  const cmd = { target, timestamp: Date.now() };
+  const cmd = { target, notify: notify || null, timestamp: Date.now() };
   commandStore[id] = cmd;
   // Always also write to 'current-card' so suite.html can find it
   commandStore['current-card'] = cmd;
